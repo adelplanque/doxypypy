@@ -94,6 +94,7 @@ class AstWalker(NodeVisitor):
     # (due to a weird behavior of codeop) single word lines.
     __errorLineRE = regexpCompile(r"^\s*((?:\S+Error|Traceback.*):?\s*(.*)|@?[\w.]+)\s*$",
                                   IGNORECASE)
+    __importFromRE = regexpCompile(r'from (?P<period>\.+)(?P<name>.*?) import')
 
     def __init__(self, lines, options, inFilename):
         """Initialize a few class variables in preparation for our walk."""
@@ -753,6 +754,26 @@ class AstWalker(NodeVisitor):
         # Remove the item we pushed onto the containing nodes hierarchy.
         containingNodes.pop()
 
+    def visit_ImportFrom(self, node, **kwargs):
+        """
+        Handles from ... import.
+
+        If option absolute import is set, replace relative import by absolute.
+        """
+
+        def repl(m):
+            period = len(m.group('period'))
+            if period > 1:
+                module_path = self.options.module_path[:-(period - 1)]
+            else:
+                module_path = list(self.options.module_path)
+            module_path += m.group('name').split('.')
+            return "from %s import" % '.'.join(module_path)
+
+        if self.options.absolute_import:
+            self.lines[node.lineno - 1] = \
+                AstWalker.__importFromRE.sub(repl, self.lines[node.lineno - 1])
+
     def parseLines(self):
         """Form an AST for the code and produce a new version of the source."""
         inAst = parse(''.join(self.lines), self.inFilename)
@@ -771,7 +792,7 @@ def main():
     """
     from optparse import OptionParser, OptionGroup
     from os import sep
-    from os.path import basename, getsize
+    from os.path import basename, dirname, abspath, exists, join, getsize
     from sys import argv, exit as sysExit
     from chardet import detect
     from codecs import BOM_UTF8, open as codecsOpen
@@ -819,6 +840,11 @@ def main():
             action="store_true", dest="object_respect",
             help="By default, doxypypy hides object class from class dependencies even if class inherits explictilty from objects (new-style class), this option disable this."
         )
+        parser.add_option(
+            "-i", "--absolute_import",
+            action="store_true", dest="absolute_import", default=False,
+            help="If True, replace relative import with absolute import."
+        )
         group = OptionGroup(parser, "Debug Options")
         group.add_option(
             "-d", "--debug",
@@ -834,6 +860,15 @@ def main():
         if not filename:
             stderr.write("No filename given." + linesep)
             sysExit(-1)
+
+        # Get module for current file using __init__.py files
+        file_path = dirname(abspath(filename[0]))
+        module_path = []
+        while exists(join(file_path, '__init__.py')):
+            name = basename(file_path)
+            file_path = dirname(file_path)
+            module_path.insert(0, name)
+        options.module_path = module_path
 
         # Turn the full path filename into a full path module location.
         fullPathNamespace = filename[0].replace(sep, '.')[:-3]
